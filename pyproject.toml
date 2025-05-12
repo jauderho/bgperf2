@@ -23,7 +23,7 @@ dynamic = ["version"]
 authors = [
   { name = "NetEngLabs" }
 ]
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 keywords = ["bgp", "performance", "networking"]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",
