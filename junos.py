@@ -10,6 +10,10 @@ class Junos(Container):
     CONTAINER_NAME = None
     GUEST_DIR = '/config'
     LOG_DIR = '/var/log'
+    # cRPD is downloaded out of band, but versions still work the usual way:
+    # tag each import as crpd:<version> and select it with --version.
+    IMAGE_REPO = 'crpd'
+    IMAGE_BUILDABLE = False
 
     def __init__(self, host_dir, conf, image='crpd'):
         super(Junos, self).__init__(self.CONTAINER_NAME, image, host_dir, self.GUEST_DIR, conf)
@@ -23,7 +27,7 @@ class Junos(Container):
     # don't build just download 
     # assume that you do this by hand
     @classmethod
-    def build_image(cls, force=False, tag='crpd', checkout='', nocache=False):
+    def build_image(cls, force=False, tag='crpd', checkout='', nocache=False, version=None):
         cls.dockerfile = ''
         print("Can't build junos, must download yourself")
         print("https://www.juniper.net/us/en/dm/crpd-free-trial.html")
@@ -56,8 +60,7 @@ class JunosTarget(Junos, Target):
 
         bgp['license'] = self.get_license_key(self.conf['license_file'])
 
-        for n in sorted(list(flatten(list(t.get('neighbors', {}).values()) for t in self.scenario_global_conf['testers'])) + 
-            [self.scenario_global_conf['monitor']], key=lambda n: n['as']):
+        for n in self.scenario_neighbors():
                 bgp['neighbors'].append(n)
         config = self.get_template(bgp, template_file="junos.j2")
      
@@ -68,10 +71,8 @@ class JunosTarget(Junos, Target):
             f.flush()
 
     def get_filter_test_config(self): 
-        file = open("filters/junos.conf", mode='r')
-        filters = file.read()
-        file.close
-        return filters
+        with open(REPO_ROOT / 'filters' / 'junos.conf') as file:
+            return file.read()
 
     def get_license_key(self, license_file):
         with open(license_file) as f:
@@ -94,7 +95,7 @@ class JunosTarget(Junos, Target):
     def get_neighbors_state(self):
         neighbors_accepted = {}
         neighbors_received = {}
-        neighbor_received_output = json.loads(self.local("cli show bgp neighbor \| no-more \| display json").decode('utf-8'))
+        neighbor_received_output = json.loads(self.local(r"cli show bgp neighbor \| no-more \| display json").decode('utf-8'))
 
         for neighbor in neighbor_received_output['bgp-information'][0]['bgp-peer']:
 

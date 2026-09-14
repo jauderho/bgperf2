@@ -17,25 +17,73 @@ from base import *
 import yaml
 import json
 
+class GoBGPNeighborReadError(Exception):
+    """`gobgp neighbor -j` did not answer with a list of neighbours.
+
+    Its own errors come back JSON-encoded, so a failed read parses cleanly into
+    a `str` and only becomes a TypeError once something indexes it. Naming it
+    here keeps that diagnosis where the evidence is.
+    """
+
+
 class GoBGP(Container):
 
     CONTAINER_NAME = None
     GUEST_DIR = '/root/config'
+    IMAGE_REPO = 'bgperf/gobgp'
+    DAEMON_BINARY = '/go/bin/gobgpd'
+    VERSIONS = ('3.35.0', '3.37.0')
+    DEFAULT_REF = 'master'
 
     def __init__(self, host_dir, conf, image='bgperf/gobgp'):
         super(GoBGP, self).__init__(self.CONTAINER_NAME, image, host_dir, self.GUEST_DIR, conf)
 
+    # On the daemon base class rather than GoBGPTarget so the monitor -- which
+    # is a GoBGP, not a target -- can report its version too. It is the
+    # instrument every timing in the results is read from, so which build it
+    # was matters as much as the target's.
+    def get_version_cmd(self):
+        return "gobgpd --version"
+
+    def exec_version_cmd(self):
+        ret = (super().exec_version_cmd() or '').strip()
+        m = re.search(r'gobgpd version (\S+)', ret)
+        if not m:
+            raise VersionUnavailable(
+                'unexpected output from `gobgpd --version`: {0!r}'.format(ret))
+        return m.group(1)
+
     @classmethod
-    def build_image(cls, force=False, tag='bgperf/gobgp', checkout='HEAD', nocache=False):
+    def resolve_ref(cls, version):
+        '''GoBGP tags releases as v<version>; branches pass through.'''
+        if not version:
+            return cls.DEFAULT_REF
+        version = str(version).strip()
+        if re.fullmatch(r'\d+(\.\d+)*', version):
+            return 'v{0}'.format(version)
+        return version
+
+    # Old GoBGP releases need the Go toolchain they were written against;
+    # 'golang:latest' stops working eventually, so pin per series when it does.
+    BUILD_VARS = {'base_image': 'golang:latest'}
+    VERSION_BUILD_VARS = ()
+
+    @classmethod
+    def build_image(cls, force=False, tag=None, checkout=None, nocache=False, version=None):
+        # The checkout used to be interpolated into a string with no placeholder,
+        # so every build silently produced master regardless of the ref asked for.
+        tag = tag or cls.image_tag()
+        v = cls.build_vars(version)
+        v['ref'] = checkout or v['ref']
         cls.dockerfile = '''
-FROM golang:1.16.6
+FROM {base_image}
 WORKDIR /root
-RUN git clone git://github.com/osrg/gobgp && cd gobgp && go mod download
+RUN git clone https://github.com/osrg/gobgp.git && cd gobgp && git checkout {ref} && go mod download
 RUN cd gobgp && go install ./cmd/gobgpd
 RUN cd gobgp && go install ./cmd/gobgp
 RUN rm -rf /root/gobgp && cp /go/bin/gobgp /root/gobgp
-'''.format(checkout)
-        super(GoBGP, cls).build_image(force, tag, nocache)
+'''.format(**v)
+        super(GoBGP, cls).build_image(force, tag, nocache=nocache)
 
 
 class GoBGPTarget(GoBGP, Target):
@@ -120,7 +168,8 @@ class GoBGPTarget(GoBGP, Target):
             config['peer-groups'] = [{'config': {'peer-group-name': 'everything'}, 'timers': {'config': {'hold-time': 90}}}]
             config['dynamic-neighbors'] = [{'config': {'prefix': '10.0.0.0/8', 'peer-group': 'everything'}}]
         else:
-            config['neighbors'] = [gen_neighbor_config(n) for n in list(flatten(list(t.get('neighbors', {}).values()) for t in self.scenario_global_conf['testers'])) + [self.scenario_global_conf['monitor']]]
+            config['neighbors'] = [gen_neighbor_config(n)
+                                   for n in self.scenario_neighbors(sort=False)]
         with open('{0}/{1}'.format(self.host_dir, self.CONFIG_FILE_NAME), 'w') as f:
             f.write(yaml.dump(config, default_flow_style=False))
         return config
@@ -135,22 +184,47 @@ class GoBGPTarget(GoBGP, Target):
             config_file_name=self.CONFIG_FILE_NAME,
             debug_level='info')
 
-    def get_version_cmd(self):
-        return "gobgpd --version"
-
-    def exec_version_cmd(self):
-        ret = super().exec_version_cmd()
-        return ret.split(' ')[2].strip('\n')
-
-
     def get_neighbors_state(self):
         neighbors_accepted = {}
         neighbors_received = {}
         neighbor_received_output = self.local("/root/gobgp neighbor -j")
         if neighbor_received_output:
             neighbor_received_output = json.loads(neighbor_received_output.decode('utf-8'))
+        else:
+            # An empty read is not an empty fleet. Falling through left this as
+            # the original `bytes`, which iterates as nothing, so every peer
+            # silently vanished from the sample for that poll.
+            raise GoBGPNeighborReadError(
+                '{0}: `gobgp neighbor -j` returned nothing'.format(self.name))
+
+        # `gobgp neighbor -j` does not always answer with an array. Under load
+        # it emits its *error* as a JSON string, and a string iterates as
+        # characters -- so `neighbor['state']` two lines down raised
+        # "TypeError: string indices must be integers" from inside a sampler
+        # thread that had no guard, killing it for the rest of the run. What
+        # that cost is in `Container.neighbor_stats()`: the campaign's
+        # `rustybgp default` cell at 50 x 100,000 was published FAILED after
+        # 2194s while the target held all 5,000,000 routes and the monitor had
+        # every one of them. Measured again with the read guarded: the same
+        # cell converges in 133s having hit this exactly once.
+        #
+        # So the shape is checked where it is known, and the failure names
+        # itself and quotes what came back. A parser that lets a bad payload
+        # become a TypeError three frames away is a parser that gets diagnosed
+        # as whatever the caller was doing.
+        if not isinstance(neighbor_received_output, list):
+            raise GoBGPNeighborReadError(
+                '{0}: `gobgp neighbor -j` returned {1}, not a list of '
+                'neighbours: {2!r}'.format(
+                    self.name, type(neighbor_received_output).__name__,
+                    str(neighbor_received_output)[:200]))
 
         for neighbor in neighbor_received_output:
+            if not isinstance(neighbor, dict):
+                raise GoBGPNeighborReadError(
+                    '{0}: `gobgp neighbor -j` returned a {1} where a neighbour '
+                    'was expected: {2!r}'.format(
+                        self.name, type(neighbor).__name__, str(neighbor)[:200]))
             if 'afi_safis' in neighbor and 'accepted' in neighbor['afi_safis'][0]['state']:
                 neighbors_accepted[neighbor['state']['neighbor_address']] = neighbor['afi_safis'][0]['state']['accepted']
             else:

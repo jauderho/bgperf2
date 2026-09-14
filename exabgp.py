@@ -15,9 +15,23 @@
 
 from base import *
 
+def pip_spec(checkout):
+    '''Turn a version into a pip requirement: '4.2.21' -> 'exabgp==4.2.21'.
+
+    ExaBGP is installed from PyPI rather than compiled, so its "ref" is a
+    version specifier; an empty one means whatever is current.
+    '''
+    checkout = (checkout or '').strip()
+    if not checkout or checkout in ('HEAD', 'master'):
+        return 'exabgp'
+    return 'exabgp=={0}'.format(checkout)
+
+
 class ExaBGP(Container):
 
     GUEST_DIR = '/root/config'
+    IMAGE_REPO = 'bgperf/exabgp'
+    DEFAULT_REF = ''
 
     def __init__(self, name, host_dir, conf, image='bgperf/exabgp'):
         super(ExaBGP, self).__init__('bgperf_exabgp_' + name, image, host_dir, self.GUEST_DIR, conf)
@@ -25,9 +39,13 @@ class ExaBGP(Container):
 
     # This Dockerfile has parts borrowed from exabgps Dockerfile
     @classmethod
-    def build_image(cls, force=False, tag='bgperf/exabgp', checkout='HEAD', nocache=False):
+    def build_image(cls, force=False, tag=None, checkout=None, nocache=False, version=None):
+        tag = tag or cls.image_tag()
         cls.dockerfile = '''
-FROM python:3-buster
+# Debian buster is archived: deb.debian.org 404s on its Release file, so any
+# apt step in a buster-based image fails at build time. bookworm is the
+# supported successor; the full (non-slim) variant is deliberate, see 681c541.
+FROM python:3-bookworm
 
 
 ENV PYTHONPATH "/tmp/exabgp/src"
@@ -42,26 +60,29 @@ RUN ln -s src/exabgp exabgp
 
 RUN echo Building exabgp 
 RUN pip3 install --upgrade pip setuptools wheel
-RUN pip3 install exabgp
+RUN pip3 install {0}
 WORKDIR /root
 
 RUN ln -s /root/exabgp /exabgp
 #ENTRYPOINT ["/bin/bash"]
-'''.format(checkout)
-        super(ExaBGP, cls).build_image(force, tag, nocache)
+'''.format(pip_spec(checkout))
+        super(ExaBGP, cls).build_image(force, tag, nocache=nocache)
 
 
 class ExaBGP_MRTParse(Container):
 
     GUEST_DIR = '/root/config'
+    IMAGE_REPO = 'bgperf/exabgp_mrtparse'
+    DEFAULT_REF = ''
 
     def __init__(self, name, host_dir, conf, image='bgperf/exabgp_mrtparse'):
         super(ExaBGP_MRTParse, self).__init__('bgperf_exabgp_mrtparse_' + name, image, host_dir, self.GUEST_DIR, conf)
 
     @classmethod
-    def build_image(cls, force=False, tag='bgperf/exabgp_mrtparse', checkout='HEAD', nocache=False):
+    def build_image(cls, force=False, tag=None, checkout=None, nocache=False, version=None):
+        tag = tag or cls.image_tag()
         cls.dockerfile = '''
-FROM python:3-slim-buster
+FROM python:3-slim-bookworm
 
 ENV PYTHONPATH "/tmp/exabgp/src"
 
@@ -75,10 +96,10 @@ RUN ln -s src/exabgp exabgp
 
 RUN echo Building exabgp 
 RUN pip3 install --upgrade pip setuptools wheel
-RUN pip3 install exabgp
+RUN pip3 install {0}
 WORKDIR /root
 
 RUN ln -s /root/exabgp /exabgp
 ENTRYPOINT ["/bin/bash"]
-'''.format(checkout)
-        super(ExaBGP_MRTParse, cls).build_image(force, tag, nocache)
+'''.format(pip_spec(checkout))
+        super(ExaBGP_MRTParse, cls).build_image(force, tag, nocache=nocache)

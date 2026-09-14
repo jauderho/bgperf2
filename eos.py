@@ -5,7 +5,11 @@ import json
 class Eos(Container):
     CONTAINER_NAME = None
     GUEST_DIR = '/mnt/flash'
-    
+    # cEOS is downloaded out of band, but versions still work the usual way:
+    # tag each import as ceos:<version> and select it with --version.
+    IMAGE_REPO = 'ceos'
+    IMAGE_BUILDABLE = False
+
     def __init__(self, host_dir, conf, image='ceos'):
         super(Eos, self).__init__(self.CONTAINER_NAME, image, host_dir, self.GUEST_DIR, conf)
         
@@ -28,7 +32,7 @@ class Eos(Container):
     # don't build just download 
     # assume that you do this by hand
     @classmethod
-    def build_image(cls, force=False, tag='ceos', checkout='', nocache=False):
+    def build_image(cls, force=False, tag='ceos', checkout='', nocache=False, version=None):
         cls.dockerfile = ''
         print("Can't build Eos, must download yourself")
 
@@ -49,8 +53,7 @@ class EosTarget(Eos, Target):
         bgp['asn'] = self.conf['as']
         bgp['router-id'] = self.conf['router-id']
 
-        for n in sorted(list(flatten(list(t.get('neighbors', {}).values()) for t in self.scenario_global_conf['testers'])) + 
-            [self.scenario_global_conf['monitor']], key=lambda n: n['as']):
+        for n in self.scenario_neighbors():
                 bgp['neighbors'].append(n)
         config = self.get_template(bgp, template_file="eos.j2")
     

@@ -18,7 +18,6 @@ from gobgp import GoBGP
 from exabgp import ExaBGP_MRTParse
 import os
 import yaml
-from subprocess import check_output, Popen, PIPE
 from  settings import dckr
 
 from base import *
@@ -43,15 +42,31 @@ class MRTTester(Container):
     #             shutil.copyfile(mrt_file_path, host_mrt_file_path)
     #         return guest_mrt_file_path
 
-    def get_mrt_file(self, conf):
-        return conf['mrt-file']
+    def get_mrt_file(self, conf, name=None):
+        '''Absolute host path of the MRT file, or None if this conf has none.
+
+        The path is used as a Docker bind-mount source, which must be absolute.
+        Resolving here lets benchmark configs use relative or ~-prefixed paths
+        instead of hardcoding someone's home directory.
+        '''
+        mrt_file = conf.get('mrt-file')
+        if not mrt_file:
+            return None
+        return str(Path(mrt_file).expanduser().resolve())
 
     def get_host_config(self):
         neighbor = next(iter(self.conf['neighbors'].values()))
+        mrt_file = self.get_mrt_file(neighbor)
+        if not mrt_file:
+            print('no mrt-file configured for tester {0}'.format(self.name))
+            sys.exit(1)
+        if not os.path.isfile(mrt_file):
+            print('mrt-file not found: {0}'.format(mrt_file))
+            sys.exit(1)
         #create an mrt_file on guest_dir so that it can be mounted
         host_config = dckr.create_host_config(
             binds=['{0}:{1}'.format(os.path.abspath(self.host_dir), self.guest_dir),
-                    '{0}:/root/mrt_file'.format(self.get_mrt_file(neighbor))],
+                    '{0}:/root/mrt_file'.format(mrt_file)],
             privileged=True,
             network_mode='bridge',
             cap_add=['NET_ADMIN']
@@ -65,6 +80,18 @@ class ExaBGPMrtTester(Tester, ExaBGP_MRTParse, MRTTester):
 
     def __init__(self, name, host_dir, conf, image='bgperf/exabgp_mrtparse'):
         super(ExaBGPMrtTester, self).__init__(name, host_dir, conf, image)
+
+    # Without these it inherited base.Tester's hardcoded 0 while bgpdump2 and
+    # gobgp rows reported real counts, so the two columns were not comparable
+    # between rows of the same batch CSV -- which is the whole reason they are
+    # in the row.
+    @staticmethod
+    def find_errors(log_dirs=(), samples=None):
+        return count_matching_lines(log_dirs, 'error', samples)
+
+    @staticmethod
+    def find_timeouts(log_dirs=(), samples=None):
+        return count_matching_lines(log_dirs, 'timeout', samples)
 
     def configure_neighbors(self, target_conf):
         tester_mrt_guest_file_path = self.get_mrt_file(self.conf, self.name)
@@ -211,8 +238,22 @@ gobgpd -t yaml -f {1}/{2} -l {3} > {1}/gobgpd.log 2>&1 &
         #startup += '\n' + 'pkill -SIGHUP gobgpd'
         return startup
 
-    def find_errors():
-        grep1 = Popen(('grep -i expired /tmp/bgperf2/mrt-injector*/*.log'), shell=True, stdout=PIPE)
-        errors = check_output(('wc', '-l'), stdin=grep1.stdout)
-        grep1.wait()
-        return errors.decode('utf-8').strip()
+    @staticmethod
+    def find_errors(log_dirs=(), samples=None):
+        '''Count expired-session messages across the injector logs.
+
+        bench() calls this on the class with the tester host directories, so it
+        has to match the signature in base.Tester -- it used to take no
+        arguments and glob /tmp/bgperf2 itself, which raised TypeError and
+        crashed every MRT run *after* it had already converged.
+        '''
+        return count_matching_lines(log_dirs, 'expired', samples)
+
+    @staticmethod
+    def find_timeouts(log_dirs=(), samples=None):
+        '''gobgp is the default MRT injector, so without this it inherited
+        base.Tester's hardcoded 0 while a bgpdump2 run of the same scenario
+        reported real counts -- the tester timeouts column was not comparable
+        between two rows of the same batch CSV.
+        '''
+        return count_matching_lines(log_dirs, 'timeout', samples)

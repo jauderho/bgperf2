@@ -5,6 +5,10 @@ import json
 class SRLinux(Container):
     CONTAINER_NAME = None
     GUEST_DIR = '/etc/opt/srlinux'
+    # Pulled, not built. `docker pull ghcr.io/nokia/srlinux:<version>` is enough
+    # to make --version work, since upstream publishes per-release tags.
+    IMAGE_REPO = 'ghcr.io/nokia/srlinux'
+    IMAGE_BUILDABLE = False
 
     def __init__(self, host_dir, conf, image='ghcr.io/nokia/srlinux'):
         super(SRLinux, self).__init__(self.CONTAINER_NAME, image, host_dir, self.GUEST_DIR, conf)
@@ -13,7 +17,7 @@ class SRLinux(Container):
     # don't build just download from docker pull ghcr.io/nokia/srlinux
     # assume that you do this by hand
     @classmethod
-    def build_image(cls, force=False, tag='ghcr.io/nokia/srlinux', checkout='', nocache=False):
+    def build_image(cls, force=False, tag='ghcr.io/nokia/srlinux', checkout='', nocache=False, version=None):
         cls.dockerfile = ''
         print("Can't build SRLinux, must download yourself")
         print("docker pull ghcr.io/nokia/srlinux")
@@ -87,8 +91,7 @@ set / network-instance default protocols bgp neighbor {0} peer-group neighbors
             pass   
 
 
-        for n in sorted(list(flatten(list(t.get('neighbors', {}).values()) for t in self.scenario_global_conf['testers'])) + 
-            [self.scenario_global_conf['monitor']], key=lambda n: n['as']):
+        for n in self.scenario_neighbors():
             config[key]["default"]["protocols"].update(gen_neighbor_config(n))
         
 
